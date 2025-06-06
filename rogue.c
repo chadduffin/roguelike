@@ -42,6 +42,7 @@ typedef enum {
 typedef struct {
     TileType type;
     bool is_visible;
+    bool is_explored; // Has this tile been seen at least once?
 } Tile;
 
 typedef struct {
@@ -260,35 +261,38 @@ void render(const Graphics* graphics, const GameState* game_state) {
     for (int y = 0; y < GRID_ROWS; ++y) {
         for (int x = 0; x < GRID_COLS; ++x) {
             SDL_Rect tile_rect = { x * TILE_WIDTH, y * TILE_HEIGHT, TILE_WIDTH, TILE_HEIGHT };
-            
-            if (!current_floor->tiles[y][x].is_visible) {
-                SDL_SetRenderDrawColor(graphics->renderer, 0, 0, 0, 255); // Black
-                SDL_RenderFillRect(graphics->renderer, &tile_rect);
-                continue;
-            }
+            const Tile* tile = &current_floor->tiles[y][x];
 
-            switch (current_floor->tiles[y][x].type) {
-                case TILE_WALL:
-                    SDL_SetRenderDrawColor(graphics->renderer, 50, 50, 50, 255);
-                    break;
-                case TILE_GROUND:
-                    SDL_SetRenderDrawColor(graphics->renderer, 150, 150, 150, 255);
-                    break;
-                case TILE_STAIRS_DOWN:
-                    SDL_SetRenderDrawColor(graphics->renderer, 0, 100, 200, 255);
-                    break;
-                case TILE_STAIRS_UP:
-                    SDL_SetRenderDrawColor(graphics->renderer, 200, 100, 0, 255);
-                    break;
+            if (tile->is_visible) {
+                // Draw visible tiles with bright colors
+                switch (tile->type) {
+                    case TILE_WALL:       SDL_SetRenderDrawColor(graphics->renderer, 80, 80, 80, 255); break;
+                    case TILE_GROUND:     SDL_SetRenderDrawColor(graphics->renderer, 180, 180, 180, 255); break;
+                    case TILE_STAIRS_DOWN: SDL_SetRenderDrawColor(graphics->renderer, 60, 120, 220, 255); break;
+                    case TILE_STAIRS_UP:   SDL_SetRenderDrawColor(graphics->renderer, 220, 120, 60, 255); break;
+                }
+                SDL_RenderFillRect(graphics->renderer, &tile_rect);
+            } else if (tile->is_explored) {
+                // Draw explored but not visible tiles with dark colors
+                switch (tile->type) {
+                    case TILE_WALL:       SDL_SetRenderDrawColor(graphics->renderer, 20, 20, 20, 255); break;
+                    case TILE_GROUND:     SDL_SetRenderDrawColor(graphics->renderer, 60, 60, 60, 255); break;
+                    case TILE_STAIRS_DOWN: SDL_SetRenderDrawColor(graphics->renderer, 20, 40, 80, 255); break;
+                    case TILE_STAIRS_UP:   SDL_SetRenderDrawColor(graphics->renderer, 80, 40, 20, 255); break;
+                }
+                 SDL_RenderFillRect(graphics->renderer, &tile_rect);
+            } else {
+                 // Unexplored tiles are pure black (already cleared)
             }
-            SDL_RenderFillRect(graphics->renderer, &tile_rect);
         }
     }
 
-    // Draw the player
-    SDL_Rect player_rect = { game_state->player.x * TILE_WIDTH, game_state->player.y * TILE_HEIGHT, TILE_WIDTH, TILE_HEIGHT };
-    SDL_SetRenderDrawColor(graphics->renderer, 255, 255, 0, 255);
-    SDL_RenderFillRect(graphics->renderer, &player_rect);
+    // Draw the player only if their tile is visible (it always should be)
+    if (current_floor->tiles[game_state->player.y][game_state->player.x].is_visible) {
+        SDL_Rect player_rect = { game_state->player.x * TILE_WIDTH, game_state->player.y * TILE_HEIGHT, TILE_WIDTH, TILE_HEIGHT };
+        SDL_SetRenderDrawColor(graphics->renderer, 255, 255, 0, 255); // Yellow
+        SDL_RenderFillRect(graphics->renderer, &player_rect);
+    }
 
     SDL_RenderPresent(graphics->renderer);
 }
@@ -301,6 +305,7 @@ void generate_floor(Floor* floor) {
         for (int x = 0; x < GRID_COLS; ++x) {
             floor->tiles[y][x].type = TILE_WALL;
             floor->tiles[y][x].is_visible = false;
+            floor->tiles[y][x].is_explored = false; // Initialize as unexplored
         }
     }
 
@@ -377,7 +382,9 @@ void update_fov(GameState* game_state) {
         }
     }
 
+    // Player's tile is always visible and explored
     floor->tiles[game_state->player.y][game_state->player.x].is_visible = true;
+    floor->tiles[game_state->player.y][game_state->player.x].is_explored = true;
 
     for (int i = 0; i < 8; i++) {
         cast_light(game_state, i, 1, 1.0f, 0.0f);
@@ -393,7 +400,6 @@ void cast_light(GameState* game_state, int octant, int row, float start_slope, f
         return;
     }
 
-    // The loop limit is just a safe upper bound; boundary checks will handle termination.
     for (int i = row; i < GRID_ROWS + GRID_COLS; i++) {
         int dx = i;
         int dy = 0;
@@ -417,6 +423,7 @@ void cast_light(GameState* game_state, int octant, int row, float start_slope, f
             }
 
             floor->tiles[y][x].is_visible = true;
+            floor->tiles[y][x].is_explored = true; // Once visible, it's always explored
 
             if (floor->tiles[y][x].type == TILE_WALL) {
                 if (blocked) {
