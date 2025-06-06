@@ -2,6 +2,7 @@
 #include <stdbool.h>
 #include <stdlib.h> // For rand(), srand(), malloc(), free()
 #include <time.h>   // For time()
+#include <math.h>   // For roundf()
 #include <SDL2/SDL.h>
 #include <SDL2/SDL_ttf.h>
 #include <SDL2/SDL_image.h>
@@ -39,7 +40,12 @@ typedef enum {
 } TileType;
 
 typedef struct {
-    TileType tiles[GRID_ROWS][GRID_COLS];
+    TileType type;
+    bool is_visible;
+} Tile;
+
+typedef struct {
+    Tile tiles[GRID_ROWS][GRID_COLS];
     SDL_Point stairs_up;
     SDL_Point stairs_down;
 } Floor;
@@ -82,6 +88,10 @@ void carve_room(Floor* floor, SDL_Rect room);
 void carve_h_corridor(Floor* floor, int x1, int x2, int y);
 void carve_v_corridor(Floor* floor, int y1, int y2, int x);
 
+// Field of View
+void update_fov(GameState* game_state);
+void cast_light(GameState* game_state, int octant, int row, float start_slope, float end_slope);
+
 
 // --- Main Function ---
 
@@ -110,9 +120,6 @@ int main(void) {
 
 // --- Game System Functions ---
 
-/**
- * @brief Initializes everything: SDL, the dungeon, and the initial game state.
- */
 bool init_systems(Graphics* graphics, GameState* game_state) {
     if (SDL_Init(SDL_INIT_VIDEO) < 0 || TTF_Init() == -1 || !(IMG_Init(IMG_INIT_PNG) & IMG_INIT_PNG)) {
         fprintf(stderr, "Could not initialize SDL libraries: %s\n", SDL_GetError());
@@ -144,29 +151,26 @@ bool init_systems(Graphics* graphics, GameState* game_state) {
     }
     
     // Adjust stairs for top and bottom floors
-    game_state->dungeon.floors[0].tiles[game_state->dungeon.floors[0].stairs_up.y][game_state->dungeon.floors[0].stairs_up.x] = TILE_GROUND;
+    game_state->dungeon.floors[0].tiles[game_state->dungeon.floors[0].stairs_up.y][game_state->dungeon.floors[0].stairs_up.x].type = TILE_GROUND;
     int last_floor = game_state->dungeon.floor_count - 1;
-    game_state->dungeon.floors[last_floor].tiles[game_state->dungeon.floors[last_floor].stairs_down.y][game_state->dungeon.floors[last_floor].stairs_down.x] = TILE_GROUND;
+    game_state->dungeon.floors[last_floor].tiles[game_state->dungeon.floors[last_floor].stairs_down.y][game_state->dungeon.floors[last_floor].stairs_down.x].type = TILE_GROUND;
 
 
     // Set initial game state
     game_state->current_floor_index = 0;
-    // Start player on the 'up' stairs of the first floor (which are now just ground)
     game_state->player.x = game_state->dungeon.floors[0].stairs_up.x;
     game_state->player.y = game_state->dungeon.floors[0].stairs_up.y;
     
+    // Initial FOV calculation
+    update_fov(game_state);
+
     return true;
 }
 
-/**
- * @brief Cleans up all allocated resources.
- */
 void cleanup(Graphics* graphics, GameState* game_state) {
-    // Free dungeon memory
     if (game_state->dungeon.floors) {
         free(game_state->dungeon.floors);
     }
-
     if (graphics->renderer) SDL_DestroyRenderer(graphics->renderer);
     if (graphics->window) SDL_DestroyWindow(graphics->window);
     IMG_Quit();
@@ -196,19 +200,17 @@ void handle_input(GameState* game_state) {
             }
 
             if (key_pressed) {
-                // Check if the next move is within the grid boundaries
                 if (next_x < 0 || next_x >= GRID_COLS || next_y < 0 || next_y >= GRID_ROWS) {
-                    continue; // Skip if out of bounds
+                    continue;
                 }
 
                 Floor* current_floor = &game_state->dungeon.floors[game_state->current_floor_index];
-                TileType next_tile = current_floor->tiles[next_y][next_x];
+                TileType next_tile_type = current_floor->tiles[next_y][next_x].type;
+                bool moved = false;
 
-                // Check the tile the player is trying to move to
-                switch (next_tile) {
+                switch (next_tile_type) {
                     case TILE_WALL:
-                        // Can't move into a wall, do nothing
-                        break;
+                        break; // Cannot move
                     
                     case TILE_STAIRS_DOWN:
                         if (game_state->current_floor_index < game_state->dungeon.floor_count - 1) {
@@ -216,6 +218,7 @@ void handle_input(GameState* game_state) {
                             Floor* new_floor = &game_state->dungeon.floors[game_state->current_floor_index];
                             game_state->player.x = new_floor->stairs_up.x;
                             game_state->player.y = new_floor->stairs_up.y;
+                            moved = true;
                         }
                         break;
 
@@ -225,13 +228,18 @@ void handle_input(GameState* game_state) {
                             Floor* new_floor = &game_state->dungeon.floors[game_state->current_floor_index];
                             game_state->player.x = new_floor->stairs_down.x;
                             game_state->player.y = new_floor->stairs_down.y;
+                            moved = true;
                         }
                         break;
                     
                     default: // Includes TILE_GROUND
                         game_state->player.x = next_x;
                         game_state->player.y = next_y;
+                        moved = true;
                         break;
+                }
+                if (moved) {
+                    update_fov(game_state);
                 }
             }
         }
@@ -239,12 +247,11 @@ void handle_input(GameState* game_state) {
 }
 
 void update_game(GameState* game_state) {
-    // Future logic for enemy AI, etc. goes here
     (void)game_state;
 }
 
 void render(const Graphics* graphics, const GameState* game_state) {
-    SDL_SetRenderDrawColor(graphics->renderer, 0, 0, 0, 255); // Black background
+    SDL_SetRenderDrawColor(graphics->renderer, 0, 0, 0, 255);
     SDL_RenderClear(graphics->renderer);
 
     const Floor* current_floor = &game_state->dungeon.floors[game_state->current_floor_index];
@@ -253,30 +260,34 @@ void render(const Graphics* graphics, const GameState* game_state) {
     for (int y = 0; y < GRID_ROWS; ++y) {
         for (int x = 0; x < GRID_COLS; ++x) {
             SDL_Rect tile_rect = { x * TILE_WIDTH, y * TILE_HEIGHT, TILE_WIDTH, TILE_HEIGHT };
-            switch (current_floor->tiles[y][x]) {
+            
+            if (!current_floor->tiles[y][x].is_visible) {
+                SDL_SetRenderDrawColor(graphics->renderer, 0, 0, 0, 255); // Black
+                SDL_RenderFillRect(graphics->renderer, &tile_rect);
+                continue;
+            }
+
+            switch (current_floor->tiles[y][x].type) {
                 case TILE_WALL:
-                    SDL_SetRenderDrawColor(graphics->renderer, 50, 50, 50, 255); // Dark grey
-                    SDL_RenderFillRect(graphics->renderer, &tile_rect);
+                    SDL_SetRenderDrawColor(graphics->renderer, 50, 50, 50, 255);
                     break;
                 case TILE_GROUND:
-                    SDL_SetRenderDrawColor(graphics->renderer, 150, 150, 150, 255); // Light grey
-                    SDL_RenderFillRect(graphics->renderer, &tile_rect);
+                    SDL_SetRenderDrawColor(graphics->renderer, 150, 150, 150, 255);
                     break;
                 case TILE_STAIRS_DOWN:
-                    SDL_SetRenderDrawColor(graphics->renderer, 0, 100, 200, 255); // Blue
-                    SDL_RenderFillRect(graphics->renderer, &tile_rect);
+                    SDL_SetRenderDrawColor(graphics->renderer, 0, 100, 200, 255);
                     break;
                 case TILE_STAIRS_UP:
-                    SDL_SetRenderDrawColor(graphics->renderer, 200, 100, 0, 255); // Orange
-                    SDL_RenderFillRect(graphics->renderer, &tile_rect);
+                    SDL_SetRenderDrawColor(graphics->renderer, 200, 100, 0, 255);
                     break;
             }
+            SDL_RenderFillRect(graphics->renderer, &tile_rect);
         }
     }
 
     // Draw the player
     SDL_Rect player_rect = { game_state->player.x * TILE_WIDTH, game_state->player.y * TILE_HEIGHT, TILE_WIDTH, TILE_HEIGHT };
-    SDL_SetRenderDrawColor(graphics->renderer, 255, 255, 0, 255); // Yellow
+    SDL_SetRenderDrawColor(graphics->renderer, 255, 255, 0, 255);
     SDL_RenderFillRect(graphics->renderer, &player_rect);
 
     SDL_RenderPresent(graphics->renderer);
@@ -285,21 +296,17 @@ void render(const Graphics* graphics, const GameState* game_state) {
 
 // --- Dungeon Generation Functions ---
 
-/**
- * @brief Generates a floor with rooms and corridors.
- */
 void generate_floor(Floor* floor) {
-    // 1. Fill the entire floor with walls
     for (int y = 0; y < GRID_ROWS; ++y) {
         for (int x = 0; x < GRID_COLS; ++x) {
-            floor->tiles[y][x] = TILE_WALL;
+            floor->tiles[y][x].type = TILE_WALL;
+            floor->tiles[y][x].is_visible = false;
         }
     }
 
     SDL_Rect rooms[MAX_ROOMS];
     int room_count = 0;
 
-    // 2. Create a number of rooms
     for (int i = 0; i < MAX_ROOMS; ++i) {
         int w = MIN_ROOM_W + rand() % (MAX_ROOM_W - MIN_ROOM_W + 1);
         int h = MIN_ROOM_H + rand() % (MAX_ROOM_H - MIN_ROOM_H + 1);
@@ -317,13 +324,10 @@ void generate_floor(Floor* floor) {
 
         if (!failed) {
             carve_room(floor, new_room);
-            
             if (room_count > 0) {
-                // 3. Connect to the previous room
                 SDL_Point new_center = {x + w / 2, y + h / 2};
                 SDL_Point prev_center = {rooms[room_count - 1].x + rooms[room_count - 1].w / 2, rooms[room_count - 1].y + rooms[room_count - 1].h / 2};
-
-                if (rand() % 2 == 0) { // 50% chance
+                if (rand() % 2 == 0) {
                     carve_h_corridor(floor, prev_center.x, new_center.x, prev_center.y);
                     carve_v_corridor(floor, prev_center.y, new_center.y, new_center.x);
                 } else {
@@ -335,32 +339,98 @@ void generate_floor(Floor* floor) {
         }
     }
     
-    // 4. Place stairs
-    // Stairs up are placed in the center of the first generated room
     floor->stairs_up = (SDL_Point){rooms[0].x + rooms[0].w / 2, rooms[0].y + rooms[0].h / 2};
-    floor->tiles[floor->stairs_up.y][floor->stairs_up.x] = TILE_STAIRS_UP;
+    floor->tiles[floor->stairs_up.y][floor->stairs_up.x].type = TILE_STAIRS_UP;
     
-    // Stairs down are placed in the center of the last generated room
     floor->stairs_down = (SDL_Point){rooms[room_count - 1].x + rooms[room_count - 1].w / 2, rooms[room_count - 1].y + rooms[room_count - 1].h / 2};
-    floor->tiles[floor->stairs_down.y][floor->stairs_down.x] = TILE_STAIRS_DOWN;
+    floor->tiles[floor->stairs_down.y][floor->stairs_down.x].type = TILE_STAIRS_DOWN;
 }
 
 void carve_room(Floor* floor, SDL_Rect room) {
     for (int y = room.y; y < room.y + room.h; ++y) {
         for (int x = room.x; x < room.x + room.w; ++x) {
-            floor->tiles[y][x] = TILE_GROUND;
+            floor->tiles[y][x].type = TILE_GROUND;
         }
     }
 }
 
 void carve_h_corridor(Floor* floor, int x1, int x2, int y) {
     for (int x = (x1 < x2 ? x1 : x2); x <= (x1 > x2 ? x1 : x2); ++x) {
-        floor->tiles[y][x] = TILE_GROUND;
+        floor->tiles[y][x].type = TILE_GROUND;
     }
 }
 
 void carve_v_corridor(Floor* floor, int y1, int y2, int x) {
     for (int y = (y1 < y2 ? y1 : y2); y <= (y1 > y2 ? y1 : y2); ++y) {
-        floor->tiles[y][x] = TILE_GROUND;
+        floor->tiles[y][x].type = TILE_GROUND;
+    }
+}
+
+// --- Field of View Functions ---
+
+void update_fov(GameState* game_state) {
+    Floor* floor = &game_state->dungeon.floors[game_state->current_floor_index];
+    
+    for (int y = 0; y < GRID_ROWS; y++) {
+        for (int x = 0; x < GRID_COLS; x++) {
+            floor->tiles[y][x].is_visible = false;
+        }
+    }
+
+    floor->tiles[game_state->player.y][game_state->player.x].is_visible = true;
+
+    for (int i = 0; i < 8; i++) {
+        cast_light(game_state, i, 1, 1.0f, 0.0f);
+    }
+}
+
+void cast_light(GameState* game_state, int octant, int row, float start_slope, float end_slope) {
+    Floor* floor = &game_state->dungeon.floors[game_state->current_floor_index];
+    int px = game_state->player.x;
+    int py = game_state->player.y;
+    
+    if (start_slope < end_slope) {
+        return;
+    }
+
+    // The loop limit is just a safe upper bound; boundary checks will handle termination.
+    for (int i = row; i < GRID_ROWS + GRID_COLS; i++) {
+        int dx = i;
+        int dy = 0;
+        bool blocked = false;
+        
+        for (dy = roundf(dx * start_slope); dy >= roundf(dx * end_slope); dy--) {
+            int x = px, y = py;
+            switch(octant) {
+                case 0: x += dy; y -= dx; break;
+                case 1: x += dx; y -= dy; break;
+                case 2: x += dx; y += dy; break;
+                case 3: x += dy; y += dx; break;
+                case 4: x -= dy; y += dx; break;
+                case 5: x -= dx; y += dy; break;
+                case 6: x -= dx; y -= dy; break;
+                case 7: x -= dy; y -= dx; break;
+            }
+
+            if (x < 0 || x >= GRID_COLS || y < 0 || y >= GRID_ROWS) {
+                continue;
+            }
+
+            floor->tiles[y][x].is_visible = true;
+
+            if (floor->tiles[y][x].type == TILE_WALL) {
+                if (blocked) {
+                    cast_light(game_state, octant, i + 1, start_slope, (dy + 0.5f) / (dx - 0.5f));
+                }
+                start_slope = (dy - 0.5f) / (dx + 0.5f);
+                blocked = true;
+            } else {
+                blocked = false;
+            }
+        }
+
+        if (blocked) {
+            break;
+        }
     }
 }
