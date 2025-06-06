@@ -29,6 +29,10 @@
 #define MIN_ROOM_H 6
 #define MAX_ROOM_H 12
 
+// Cellular Automata Parameters
+#define CA_CHANCE_TO_START_ALIVE 45
+#define CA_SIMULATION_STEPS 5
+
 
 // --- Enum and Struct Definitions ---
 
@@ -36,7 +40,8 @@ typedef enum {
     TILE_WALL,
     TILE_GROUND,
     TILE_STAIRS_UP,
-    TILE_STAIRS_DOWN
+    TILE_STAIRS_DOWN,
+    TILE_WATER
 } TileType;
 
 typedef struct {
@@ -88,6 +93,7 @@ void generate_floor(Floor* floor);
 void carve_room(Floor* floor, SDL_Rect room);
 void carve_h_corridor(Floor* floor, int x1, int x2, int y);
 void carve_v_corridor(Floor* floor, int y1, int y2, int x);
+void generate_lakes(Floor* floor);
 
 // Field of View
 void update_fov(GameState* game_state);
@@ -211,6 +217,7 @@ void handle_input(GameState* game_state) {
 
                 switch (next_tile_type) {
                     case TILE_WALL:
+                        // Water is now traversable, so it's removed from this case.
                         break; // Cannot move
                     
                     case TILE_STAIRS_DOWN:
@@ -233,7 +240,7 @@ void handle_input(GameState* game_state) {
                         }
                         break;
                     
-                    default: // Includes TILE_GROUND
+                    default: // Includes TILE_GROUND and TILE_WATER
                         game_state->player.x = next_x;
                         game_state->player.y = next_y;
                         moved = true;
@@ -264,33 +271,30 @@ void render(const Graphics* graphics, const GameState* game_state) {
             const Tile* tile = &current_floor->tiles[y][x];
 
             if (tile->is_visible) {
-                // Draw visible tiles with bright colors
                 switch (tile->type) {
-                    case TILE_WALL:       SDL_SetRenderDrawColor(graphics->renderer, 80, 80, 80, 255); break;
-                    case TILE_GROUND:     SDL_SetRenderDrawColor(graphics->renderer, 180, 180, 180, 255); break;
+                    case TILE_WALL:        SDL_SetRenderDrawColor(graphics->renderer, 80, 80, 80, 255); break;
+                    case TILE_GROUND:      SDL_SetRenderDrawColor(graphics->renderer, 180, 180, 180, 255); break;
                     case TILE_STAIRS_DOWN: SDL_SetRenderDrawColor(graphics->renderer, 60, 120, 220, 255); break;
                     case TILE_STAIRS_UP:   SDL_SetRenderDrawColor(graphics->renderer, 220, 120, 60, 255); break;
+                    case TILE_WATER:       SDL_SetRenderDrawColor(graphics->renderer, 50, 80, 200, 255); break;
                 }
                 SDL_RenderFillRect(graphics->renderer, &tile_rect);
             } else if (tile->is_explored) {
-                // Draw explored but not visible tiles with dark colors
                 switch (tile->type) {
-                    case TILE_WALL:       SDL_SetRenderDrawColor(graphics->renderer, 20, 20, 20, 255); break;
-                    case TILE_GROUND:     SDL_SetRenderDrawColor(graphics->renderer, 60, 60, 60, 255); break;
+                    case TILE_WALL:        SDL_SetRenderDrawColor(graphics->renderer, 20, 20, 20, 255); break;
+                    case TILE_GROUND:      SDL_SetRenderDrawColor(graphics->renderer, 60, 60, 60, 255); break;
                     case TILE_STAIRS_DOWN: SDL_SetRenderDrawColor(graphics->renderer, 20, 40, 80, 255); break;
                     case TILE_STAIRS_UP:   SDL_SetRenderDrawColor(graphics->renderer, 80, 40, 20, 255); break;
+                    case TILE_WATER:       SDL_SetRenderDrawColor(graphics->renderer, 15, 25, 70, 255); break;
                 }
                  SDL_RenderFillRect(graphics->renderer, &tile_rect);
-            } else {
-                 // Unexplored tiles are pure black (already cleared)
             }
         }
     }
 
-    // Draw the player only if their tile is visible (it always should be)
     if (current_floor->tiles[game_state->player.y][game_state->player.x].is_visible) {
         SDL_Rect player_rect = { game_state->player.x * TILE_WIDTH, game_state->player.y * TILE_HEIGHT, TILE_WIDTH, TILE_HEIGHT };
-        SDL_SetRenderDrawColor(graphics->renderer, 255, 255, 0, 255); // Yellow
+        SDL_SetRenderDrawColor(graphics->renderer, 255, 255, 0, 255);
         SDL_RenderFillRect(graphics->renderer, &player_rect);
     }
 
@@ -305,7 +309,7 @@ void generate_floor(Floor* floor) {
         for (int x = 0; x < GRID_COLS; ++x) {
             floor->tiles[y][x].type = TILE_WALL;
             floor->tiles[y][x].is_visible = false;
-            floor->tiles[y][x].is_explored = false; // Initialize as unexplored
+            floor->tiles[y][x].is_explored = false;
         }
     }
 
@@ -344,12 +348,80 @@ void generate_floor(Floor* floor) {
         }
     }
     
+    // Generate and apply lakes before placing stairs
+    generate_lakes(floor);
+
     floor->stairs_up = (SDL_Point){rooms[0].x + rooms[0].w / 2, rooms[0].y + rooms[0].h / 2};
     floor->tiles[floor->stairs_up.y][floor->stairs_up.x].type = TILE_STAIRS_UP;
     
     floor->stairs_down = (SDL_Point){rooms[room_count - 1].x + rooms[room_count - 1].w / 2, rooms[room_count - 1].y + rooms[room_count - 1].h / 2};
     floor->tiles[floor->stairs_down.y][floor->stairs_down.x].type = TILE_STAIRS_DOWN;
 }
+
+int ca_count_alive_neighbors(bool map[GRID_ROWS][GRID_COLS], int x, int y) {
+    int count = 0;
+    for (int i = -1; i < 2; i++) {
+        for (int j = -1; j < 2; j++) {
+            if (i == 0 && j == 0) continue;
+
+            int nx = x + i;
+            int ny = y + j;
+
+            if (nx < 0 || nx >= GRID_COLS || ny < 0 || ny >= GRID_ROWS) {
+                count++; // Count out-of-bounds as "alive" to keep edges solid
+            } else if (map[ny][nx]) {
+                count++;
+            }
+        }
+    }
+    return count;
+}
+
+void ca_do_simulation_step(bool old_map[GRID_ROWS][GRID_COLS], bool new_map[GRID_ROWS][GRID_COLS]) {
+    for (int y = 0; y < GRID_ROWS; y++) {
+        for (int x = 0; x < GRID_COLS; x++) {
+            int nbs = ca_count_alive_neighbors(old_map, x, y);
+            if (old_map[y][x]) {
+                new_map[y][x] = nbs >= 4;
+            } else {
+                new_map[y][x] = nbs >= 5;
+            }
+        }
+    }
+}
+
+void generate_lakes(Floor* floor) {
+    bool ca_map1[GRID_ROWS][GRID_COLS];
+    bool ca_map2[GRID_ROWS][GRID_COLS];
+
+    // Seed the initial map
+    for (int y = 0; y < GRID_ROWS; y++) {
+        for (int x = 0; x < GRID_COLS; x++) {
+            ca_map1[y][x] = (rand() % 100) < CA_CHANCE_TO_START_ALIVE;
+        }
+    }
+
+    // Run the simulation
+    for (int i = 0; i < CA_SIMULATION_STEPS; i++) {
+        ca_do_simulation_step(ca_map1, ca_map2);
+        // Swap maps for the next iteration
+        for(int y = 0; y < GRID_ROWS; y++) {
+            for(int x = 0; x < GRID_COLS; x++) {
+                ca_map1[y][x] = ca_map2[y][x];
+            }
+        }
+    }
+
+    // Apply the final blob map to the floor
+    for (int y = 0; y < GRID_ROWS; y++) {
+        for (int x = 0; x < GRID_COLS; x++) {
+            if (ca_map1[y][x] && floor->tiles[y][x].type == TILE_GROUND) {
+                floor->tiles[y][x].type = TILE_WATER;
+            }
+        }
+    }
+}
+
 
 void carve_room(Floor* floor, SDL_Rect room) {
     for (int y = room.y; y < room.y + room.h; ++y) {
@@ -382,7 +454,6 @@ void update_fov(GameState* game_state) {
         }
     }
 
-    // Player's tile is always visible and explored
     floor->tiles[game_state->player.y][game_state->player.x].is_visible = true;
     floor->tiles[game_state->player.y][game_state->player.x].is_explored = true;
 
@@ -423,7 +494,7 @@ void cast_light(GameState* game_state, int octant, int row, float start_slope, f
             }
 
             floor->tiles[y][x].is_visible = true;
-            floor->tiles[y][x].is_explored = true; // Once visible, it's always explored
+            floor->tiles[y][x].is_explored = true;
 
             if (floor->tiles[y][x].type == TILE_WALL) {
                 if (blocked) {
