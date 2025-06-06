@@ -151,6 +151,7 @@ bool init_systems(Graphics* graphics, GameState* game_state) {
 
     // Set initial game state
     game_state->current_floor_index = 0;
+    // Start player on the 'up' stairs of the first floor (which are now just ground)
     game_state->player.x = game_state->dungeon.floors[0].stairs_up.x;
     game_state->player.y = game_state->dungeon.floors[0].stairs_up.y;
     
@@ -184,47 +185,53 @@ void handle_input(GameState* game_state) {
         } else if (event.type == SDL_KEYDOWN) {
             int next_x = game_state->player.x;
             int next_y = game_state->player.y;
-            bool moved = false;
+            bool key_pressed = false;
 
             switch (event.key.keysym.sym) {
                 case SDLK_ESCAPE: game_state->is_running = false; break;
-                case SDLK_UP: case SDLK_k: next_y--; moved = true; break;
-                case SDLK_DOWN: case SDLK_j: next_y++; moved = true; break;
-                case SDLK_LEFT: case SDLK_h: next_x--; moved = true; break;
-                case SDLK_RIGHT: case SDLK_l: next_x++; moved = true; break;
-                
-                // Stair traversal
-                case SDLK_GREATER: // '>' key for stairs down
-                    if (game_state->current_floor_index < game_state->dungeon.floor_count - 1) {
-                        Floor* current_floor = &game_state->dungeon.floors[game_state->current_floor_index];
-                        if (game_state->player.x == current_floor->stairs_down.x && game_state->player.y == current_floor->stairs_down.y) {
+                case SDLK_UP: case SDLK_k: next_y--; key_pressed = true; break;
+                case SDLK_DOWN: case SDLK_j: next_y++; key_pressed = true; break;
+                case SDLK_LEFT: case SDLK_h: next_x--; key_pressed = true; break;
+                case SDLK_RIGHT: case SDLK_l: next_x++; key_pressed = true; break;
+            }
+
+            if (key_pressed) {
+                // Check if the next move is within the grid boundaries
+                if (next_x < 0 || next_x >= GRID_COLS || next_y < 0 || next_y >= GRID_ROWS) {
+                    continue; // Skip if out of bounds
+                }
+
+                Floor* current_floor = &game_state->dungeon.floors[game_state->current_floor_index];
+                TileType next_tile = current_floor->tiles[next_y][next_x];
+
+                // Check the tile the player is trying to move to
+                switch (next_tile) {
+                    case TILE_WALL:
+                        // Can't move into a wall, do nothing
+                        break;
+                    
+                    case TILE_STAIRS_DOWN:
+                        if (game_state->current_floor_index < game_state->dungeon.floor_count - 1) {
                             game_state->current_floor_index++;
                             Floor* new_floor = &game_state->dungeon.floors[game_state->current_floor_index];
                             game_state->player.x = new_floor->stairs_up.x;
                             game_state->player.y = new_floor->stairs_up.y;
                         }
-                    }
-                    break;
-                case SDLK_LESS: // '<' key for stairs up
-                    if (game_state->current_floor_index > 0) {
-                        Floor* current_floor = &game_state->dungeon.floors[game_state->current_floor_index];
-                         if (game_state->player.x == current_floor->stairs_up.x && game_state->player.y == current_floor->stairs_up.y) {
+                        break;
+
+                    case TILE_STAIRS_UP:
+                        if (game_state->current_floor_index > 0) {
                             game_state->current_floor_index--;
                             Floor* new_floor = &game_state->dungeon.floors[game_state->current_floor_index];
                             game_state->player.x = new_floor->stairs_down.x;
                             game_state->player.y = new_floor->stairs_down.y;
                         }
-                    }
-                    break;
-            }
-
-            if (moved) {
-                // Bounds and collision check
-                if (next_x >= 0 && next_x < GRID_COLS && next_y >= 0 && next_y < GRID_ROWS) {
-                    if (game_state->dungeon.floors[game_state->current_floor_index].tiles[next_y][next_x] != TILE_WALL) {
+                        break;
+                    
+                    default: // Includes TILE_GROUND
                         game_state->player.x = next_x;
                         game_state->player.y = next_y;
-                    }
+                        break;
                 }
             }
         }
@@ -329,9 +336,11 @@ void generate_floor(Floor* floor) {
     }
     
     // 4. Place stairs
+    // Stairs up are placed in the center of the first generated room
     floor->stairs_up = (SDL_Point){rooms[0].x + rooms[0].w / 2, rooms[0].y + rooms[0].h / 2};
     floor->tiles[floor->stairs_up.y][floor->stairs_up.x] = TILE_STAIRS_UP;
     
+    // Stairs down are placed in the center of the last generated room
     floor->stairs_down = (SDL_Point){rooms[room_count - 1].x + rooms[room_count - 1].w / 2, rooms[room_count - 1].y + rooms[room_count - 1].h / 2};
     floor->tiles[floor->stairs_down.y][floor->stairs_down.x] = TILE_STAIRS_DOWN;
 }
