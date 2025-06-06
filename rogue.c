@@ -4,33 +4,52 @@
 #include <SDL2/SDL_ttf.h>
 #include <SDL2/SDL_image.h>
 
-// Screen dimensions
-#define SCREEN_WIDTH 1024
-#define SCREEN_HEIGHT 768
+// --- Game Constants ---
 
-// Forward declarations for structs
+// The dimensions of the tile grid
+#define GRID_COLS 80
+#define GRID_ROWS 50
+
+// The pixel dimensions of a single tile
+#define TILE_WIDTH 12
+#define TILE_HEIGHT 12
+
+// The calculated screen dimensions
+#define SCREEN_WIDTH (GRID_COLS * TILE_WIDTH)
+#define SCREEN_HEIGHT (GRID_ROWS * TILE_HEIGHT)
+
+
+// --- Struct Definitions ---
+
+// Forward declarations
 typedef struct Graphics Graphics;
 typedef struct GameState GameState;
 
-// Struct to hold all SDL-related components
+// Holds all SDL-related components
 struct Graphics {
     SDL_Window* window;
     SDL_Renderer* renderer;
-    // You can add fonts and textures here later
-    // TTF_Font* font;
 };
 
-// Struct to hold the player's state
+// Holds the player's state (position is in grid coordinates)
 typedef struct {
-    int x;
-    int y;
+    int x; // Column
+    int y; // Row
 } Player;
 
-// Struct to hold the overall game state
+// Holds the game world's data
+typedef struct {
+    // In the future, this will hold the map layout, e.g., char map[GRID_ROWS][GRID_COLS];
+    int placeholder; // To avoid empty struct issues
+} World;
+
+// Holds the overall game state
 struct GameState {
     bool is_running;
     Player player;
+    World world;
 };
+
 
 // --- Function Prototypes ---
 
@@ -47,7 +66,8 @@ int main(void) {
     Graphics graphics = {0};
     GameState game_state = {
         .is_running = true,
-        .player = { .x = SCREEN_WIDTH / 2, .y = SCREEN_HEIGHT / 2 }
+        .player = { .x = GRID_COLS / 2, .y = GRID_ROWS / 2 },
+        .world = {0}
     };
 
     if (!init_sdl(&graphics)) {
@@ -101,11 +121,10 @@ bool init_sdl(Graphics* graphics) {
         SCREEN_HEIGHT,
         SDL_WINDOW_SHOWN
     );
+
     if (!graphics->window) {
         fprintf(stderr, "Could not create window: %s\n", SDL_GetError());
-        IMG_Quit();
-        TTF_Quit();
-        SDL_Quit();
+        IMG_Quit(); TTF_Quit(); SDL_Quit();
         return false;
     }
 
@@ -113,9 +132,7 @@ bool init_sdl(Graphics* graphics) {
     if (!graphics->renderer) {
         fprintf(stderr, "Could not create renderer: %s\n", SDL_GetError());
         SDL_DestroyWindow(graphics->window);
-        IMG_Quit();
-        TTF_Quit();
-        SDL_Quit();
+        IMG_Quit(); TTF_Quit(); SDL_Quit();
         return false;
     }
 
@@ -127,19 +144,15 @@ bool init_sdl(Graphics* graphics) {
  * @param graphics A pointer to the Graphics struct containing the resources to be freed.
  */
 void cleanup(Graphics* graphics) {
-    if (graphics->renderer) {
-        SDL_DestroyRenderer(graphics->renderer);
-    }
-    if (graphics->window) {
-        SDL_DestroyWindow(graphics->window);
-    }
+    if (graphics->renderer) SDL_DestroyRenderer(graphics->renderer);
+    if (graphics->window) SDL_DestroyWindow(graphics->window);
     IMG_Quit();
     TTF_Quit();
     SDL_Quit();
 }
 
 /**
- * @brief Processes all pending SDL events.
+ * @brief Processes all pending SDL events and updates player position.
  * @param game_state A pointer to the GameState to be modified based on input.
  */
 void handle_input(GameState* game_state) {
@@ -147,22 +160,29 @@ void handle_input(GameState* game_state) {
     while (SDL_PollEvent(&event)) {
         if (event.type == SDL_QUIT) {
             game_state->is_running = false;
-        } else if (event.type == SDL_KEYDOWN) {
+        }
+        // Player movement is handled on key press
+        else if (event.type == SDL_KEYDOWN) {
             switch (event.key.keysym.sym) {
                 case SDLK_ESCAPE:
                     game_state->is_running = false;
                     break;
+                // --- Player Movement ---
                 case SDLK_UP:
-                    game_state->player.y -= 10;
+                case SDLK_k:
+                    if (game_state->player.y > 0) game_state->player.y--;
                     break;
                 case SDLK_DOWN:
-                    game_state->player.y += 10;
+                case SDLK_j:
+                    if (game_state->player.y < GRID_ROWS - 1) game_state->player.y++;
                     break;
                 case SDLK_LEFT:
-                    game_state->player.x -= 10;
+                case SDLK_h:
+                    if (game_state->player.x > 0) game_state->player.x--;
                     break;
                 case SDLK_RIGHT:
-                    game_state->player.x += 10;
+                case SDLK_l:
+                    if (game_state->player.x < GRID_COLS - 1) game_state->player.x++;
                     break;
             }
         }
@@ -180,7 +200,7 @@ void update_game(GameState* game_state) {
 }
 
 /**
- * @brief Renders the game to the screen.
+ * @brief Renders the game to the screen based on the grid.
  * @param graphics A pointer to the Graphics struct.
  * @param game_state A pointer to the GameState struct containing what to render.
  */
@@ -190,14 +210,16 @@ void render(const Graphics* graphics, const GameState* game_state) {
     SDL_RenderClear(graphics->renderer);
 
     // --- Draw game objects here ---
-    
-    // Draw the player (as a white rectangle for now)
+
+    // Define the player's rectangle based on its grid position and tile size
     SDL_Rect player_rect = {
-        .x = game_state->player.x,
-        .y = game_state->player.y,
-        .w = 20,
-        .h = 20
+        .x = game_state->player.x * TILE_WIDTH,
+        .y = game_state->player.y * TILE_HEIGHT,
+        .w = TILE_WIDTH,
+        .h = TILE_HEIGHT
     };
+
+    // Draw the player (as a white '@' symbol-like square for now)
     SDL_SetRenderDrawColor(graphics->renderer, 255, 255, 255, 255);
     SDL_RenderFillRect(graphics->renderer, &player_rect);
 
